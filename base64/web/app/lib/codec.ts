@@ -28,7 +28,7 @@ async function gzipCompress(data: Uint8Array): Promise<Uint8Array> {
   const writer = stream.writable.getWriter();
   const reader = stream.readable.getReader();
 
-  writer.write(new Uint8Array(data) as Uint8Array<ArrayBuffer>);
+  writer.write(data);
   writer.close();
 
   const chunks: Uint8Array[] = [];
@@ -55,7 +55,7 @@ async function gzipDecompress(data: Uint8Array): Promise<Uint8Array> {
   const writer = stream.writable.getWriter();
   const reader = stream.readable.getReader();
 
-  writer.write(new Uint8Array(data) as Uint8Array<ArrayBuffer>);
+  writer.write(data);
   writer.close();
 
   const chunks: Uint8Array[] = [];
@@ -140,7 +140,7 @@ function fileToUint8Array(file: File): Promise<Uint8Array> {
 }
 
 function downloadBytes(bytes: Uint8Array, filename: string): void {
-  const blob = new Blob([new Uint8Array(bytes) as Uint8Array<ArrayBuffer>]);
+  const blob = new Blob([bytes]);
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;

@@ -1,0 +1,110 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`EncoderDecoder > matches snapshot 1`] = `
+<div>
+  <div
+    class="w-full max-w-3xl mx-auto"
+  >
+    <div
+      class="bg-card border border-card-border rounded-2xl shadow-lg p-6 sm:p-8 space-y-6"
+    >
+      <div
+        class="flex items-center justify-between flex-wrap gap-3"
+      >
+        <h2
+          class="text-xl font-semibold text-foreground"
+        >
+          Encode
+        </h2>
+        <div
+          class="flex items-center gap-3"
+        >
+          <label
+            class="flex items-center gap-2 text-sm select-none text-foreground cursor-pointer"
+          >
+            <input
+              checked=""
+              class="w-4 h-4 rounded border-input-border text-primary accent-primary cursor-pointer disabled:cursor-not-allowed"
+              type="checkbox"
+            />
+            Gzip
+          </label>
+          <button
+            class="flex items-center gap-2 px-4 py-2 rounded-lg bg-primary text-white text-sm font-medium hover:opacity-90 transition-opacity cursor-pointer"
+          >
+            <svg
+              class="w-4 h-4"
+              fill="none"
+              stroke="currentColor"
+              viewBox="0 0 24 24"
+            >
+              <path
+                d="M8 7h12m0 0l-4-4m4 4l-4 4m0 6H4m0 0l4 4m-4-4l4-4"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                stroke-width="2"
+              />
+            </svg>
+            Switch to 
+            Decode
+          </button>
+        </div>
+      </div>
+      <div
+        class="space-y-2"
+      >
+        <div
+          class="flex items-center justify-between"
+        >
+          <label
+            class="block text-sm font-medium text-foreground"
+          >
+            Plain Text or File
+          </label>
+          <label
+            class="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium bg-primary-light text-primary hover:opacity-80 transition-opacity cursor-pointer"
+          >
+            <svg
+              class="w-3.5 h-3.5"
+              fill="none"
+              stroke="currentColor"
+              viewBox="0 0 24 24"
+            >
+              <path
+                d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                stroke-width="2"
+              />
+            </svg>
+            Upload File
+            <input
+              class="hidden"
+              type="file"
+            />
+          </label>
+        </div>
+        <textarea
+          class="w-full h-40 p-3 rounded-lg border border-input-border bg-input-bg text-foreground font-mono text-sm resize-y focus:outline-none focus:ring-2 focus:ring-primary focus:border-transparent"
+          placeholder="Enter text to encode..."
+        />
+      </div>
+      <div
+        class="flex gap-3"
+      >
+        <button
+          class="flex-1 py-2.5 px-4 rounded-lg font-medium text-sm text-white transition-opacity cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed bg-primary hover:opacity-90"
+          disabled=""
+        >
+          Encode
+        </button>
+        <button
+          class="px-4 py-2.5 rounded-lg border border-input-border text-sm font-medium text-foreground hover:bg-input-bg transition-colors cursor-pointer"
+        >
+          Clear
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+`;

@@ -53,13 +53,12 @@ npm install && npm ci                  # use lockfile
 
 # Lint & type check
 tsc --noEmit                           # strict mode
-eslint src/ --ext .ts,.tsx
-prettier --check src/
+eslint app/ --ext .ts,.tsx
+prettier --check app/
 
 # Test
 vitest run                             # or jest
 
 # Build
-vite build                             # frontend
-tsc && esbuild dist/index.js --bundle  # library
+next build                             # frontend
 ```

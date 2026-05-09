@@ -11,6 +11,10 @@ import {
 } from "@/app/lib/codec";
 import type { Mode } from "@/app/lib/codec";
 
+const gzipSupported =
+  typeof CompressionStream !== "undefined" &&
+  typeof DecompressionStream !== "undefined";
+
 export default function EncoderDecoder() {
   const [mode, setMode] = useState<Mode>("encode");
   const [useGzip, setUseGzip] = useState(true);
@@ -117,14 +121,18 @@ export default function EncoderDecoder() {
             {mode === "encode" ? "Encode" : "Decode"}
           </h2>
           <div className="flex items-center gap-3">
-            <label className="flex items-center gap-2 text-sm text-foreground cursor-pointer select-none">
+            <label className={`flex items-center gap-2 text-sm select-none ${gzipSupported ? "text-foreground cursor-pointer" : "text-foreground/40 cursor-not-allowed"}`}>
               <input
                 type="checkbox"
                 checked={useGzip}
                 onChange={(e) => setUseGzip(e.target.checked)}
-                className="w-4 h-4 rounded border-input-border text-primary accent-primary cursor-pointer"
+                disabled={!gzipSupported}
+                className="w-4 h-4 rounded border-input-border text-primary accent-primary cursor-pointer disabled:cursor-not-allowed"
               />
               Gzip
+              {!gzipSupported && (
+                <span className="text-xs text-red-500">(not supported in this browser)</span>
+              )}
             </label>
             <button
               onClick={handleModeToggle}
