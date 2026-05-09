@@ -1,0 +1,166 @@
+type Mode = "encode" | "decode";
+
+interface ConversionResult {
+  success: boolean;
+  output: string;
+  error?: string;
+}
+
+function uint8ArrayToBase64(bytes: Uint8Array): string {
+  let binary = "";
+  for (let i = 0; i < bytes.length; i++) {
+    binary += String.fromCharCode(bytes[i]);
+  }
+  return btoa(binary);
+}
+
+function base64ToUint8Array(base64: string): Uint8Array {
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return bytes;
+}
+
+async function gzipCompress(data: Uint8Array): Promise<Uint8Array> {
+  const stream = new CompressionStream("gzip");
+  const writer = stream.writable.getWriter();
+  const reader = stream.readable.getReader();
+
+  writer.write(new Uint8Array(data) as Uint8Array<ArrayBuffer>);
+  writer.close();
+
+  const chunks: Uint8Array[] = [];
+  let totalLength = 0;
+
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    chunks.push(value);
+    totalLength += value.length;
+  }
+
+  const result = new Uint8Array(totalLength);
+  let offset = 0;
+  for (const chunk of chunks) {
+    result.set(chunk, offset);
+    offset += chunk.length;
+  }
+  return result;
+}
+
+async function gzipDecompress(data: Uint8Array): Promise<Uint8Array> {
+  const stream = new DecompressionStream("gzip");
+  const writer = stream.writable.getWriter();
+  const reader = stream.readable.getReader();
+
+  writer.write(new Uint8Array(data) as Uint8Array<ArrayBuffer>);
+  writer.close();
+
+  const chunks: Uint8Array[] = [];
+  let totalLength = 0;
+
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    chunks.push(value);
+    totalLength += value.length;
+  }
+
+  const result = new Uint8Array(totalLength);
+  let offset = 0;
+  for (const chunk of chunks) {
+    result.set(chunk, offset);
+    offset += chunk.length;
+  }
+  return result;
+}
+
+async function encodeBytes(data: Uint8Array, useGzip: boolean): Promise<string> {
+  const base64String = uint8ArrayToBase64(data);
+  if (!useGzip) return base64String;
+  const base64Bytes = new TextEncoder().encode(base64String);
+  const compressed = await gzipCompress(base64Bytes);
+  return uint8ArrayToBase64(compressed);
+}
+
+async function decodeToBytes(encoded: string, useGzip: boolean): Promise<Uint8Array> {
+  if (!useGzip) return base64ToUint8Array(encoded);
+  const compressedBytes = base64ToUint8Array(encoded);
+  const decompressed = await gzipDecompress(compressedBytes);
+  const base64String = new TextDecoder().decode(decompressed);
+  return base64ToUint8Array(base64String);
+}
+
+async function encode(text: string, useGzip: boolean = true): Promise<string> {
+  const textBytes = new TextEncoder().encode(text);
+  return encodeBytes(textBytes, useGzip);
+}
+
+async function decode(encoded: string, useGzip: boolean = true): Promise<string> {
+  const bytes = await decodeToBytes(encoded, useGzip);
+  return new TextDecoder().decode(bytes);
+}
+
+async function convert(input: string, mode: Mode, useGzip: boolean = true): Promise<ConversionResult> {
+  if (!input.trim()) {
+    return { success: false, output: "", error: "Input is empty" };
+  }
+
+  try {
+    if (mode === "encode") {
+      const output = await encode(input, useGzip);
+      return { success: true, output };
+    } else {
+      const output = await decode(input, useGzip);
+      return { success: true, output };
+    }
+  } catch (e: unknown) {
+    const message = e instanceof Error ? e.message : "Unknown error";
+    return {
+      success: false,
+      output: "",
+      error: mode === "decode"
+        ? `Decode failed: ${message}. Ensure input is a valid base64${useGzip ? "-gzip" : ""} string.`
+        : `Encode failed: ${message}`,
+    };
+  }
+}
+
+function fileToUint8Array(file: File): Promise<Uint8Array> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      resolve(new Uint8Array(reader.result as ArrayBuffer));
+    };
+    reader.onerror = () => reject(new Error("Failed to read file"));
+    reader.readAsArrayBuffer(file);
+  });
+}
+
+function downloadBytes(bytes: Uint8Array, filename: string): void {
+  const blob = new Blob([new Uint8Array(bytes) as Uint8Array<ArrayBuffer>]);
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+function downloadText(text: string, filename: string): void {
+  downloadBytes(new TextEncoder().encode(text), filename);
+}
+
+export {
+  convert,
+  encode,
+  decode,
+  encodeBytes,
+  decodeToBytes,
+  fileToUint8Array,
+  downloadBytes,
+  downloadText,
+};
+export type { Mode, ConversionResult };
