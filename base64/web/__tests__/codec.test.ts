@@ -7,6 +7,42 @@ import {
   decodeToBytes,
 } from "@/app/lib/codec";
 
+function base64ToBytes(base64: string): Uint8Array<ArrayBuffer> {
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return bytes;
+}
+
+async function gunzipBytes(data: Uint8Array<ArrayBuffer>): Promise<Uint8Array<ArrayBuffer>> {
+  const stream = new DecompressionStream("gzip");
+  const writer = stream.writable.getWriter();
+  const reader = stream.readable.getReader();
+
+  await writer.write(data);
+  await writer.close();
+
+  const chunks: Uint8Array<ArrayBuffer>[] = [];
+  let totalLength = 0;
+
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    chunks.push(value);
+    totalLength += value.length;
+  }
+
+  const result = new Uint8Array(totalLength);
+  let offset = 0;
+  for (const chunk of chunks) {
+    result.set(chunk, offset);
+    offset += chunk.length;
+  }
+  return result;
+}
+
 describe("codec", () => {
   describe("encode + decode roundtrip (with gzip)", () => {
     it("should encode and decode plain text", async () => {
@@ -35,6 +71,17 @@ describe("codec", () => {
       const encoded = await encode(input);
       const decoded = await decode(encoded);
       expect(decoded).toBe(input);
+    });
+
+    it("should produce base64-wrapped standard gzip bytes", async () => {
+      const input = "interoperable gzip payload";
+      const encoded = await encode(input, true);
+      const compressed = base64ToBytes(encoded);
+
+      expect([...compressed.slice(0, 3)]).toEqual([0x1f, 0x8b, 0x08]);
+
+      const decompressed = await gunzipBytes(compressed);
+      expect(new TextDecoder().decode(decompressed)).toBe(input);
     });
   });
 

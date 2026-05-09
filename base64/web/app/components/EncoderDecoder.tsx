@@ -25,7 +25,7 @@ export default function EncoderDecoder() {
   const [loading, setLoading] = useState(false);
   const [fileName, setFileName] = useState("");
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const [fileData, setFileData] = useState<Uint8Array | null>(null);
+  const [fileData, setFileData] = useState<Uint8Array<ArrayBuffer> | null>(null);
 
   const handleConvert = async () => {
     setLoading(true);
@@ -75,9 +75,9 @@ export default function EncoderDecoder() {
 
   const handleDownload = async () => {
     if (!output) return;
-    if (fileData && mode === "encode") {
+    if (mode === "encode") {
       const suffix = useGzip ? ".gz.b64" : ".b64";
-      downloadText(output, `${fileName || "file"}${suffix}`);
+      downloadText(output, `${fileName || "encoded"}${suffix}`);
     } else {
       try {
         const bytes = await decodeToBytes(output, useGzip);

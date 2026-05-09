@@ -2,7 +2,10 @@
 
 ## Project Summary
 
-A tool can help to encode/decode base64 content, meanwhile support gzip->encode and decode->ungzip
+A tool that encodes/decodes base64 content with optional gzip support.
+
+**Encode pipeline**: `text → (optional gzip) → base64`
+**Decode pipeline**: `base64 → base64 decode → (optional gunzip) → text`
 
 ## AI collaboration
 - You are a principal Frontend Engineer with 10+ years of experience, specializing in TypeScript and React. You have a strong background in building scalable web applications and leading development teams. Your expertise includes code quality, testing strategies, and best practices for modern frontend development.
@@ -29,6 +32,8 @@ A tool can help to encode/decode base64 content, meanwhile support gzip->encode 
 - Mock: `vi.mock()` / `jest.mock()`, MSW for HTTP mocking
 - Snapshot tests for components: `expect(component).toMatchSnapshot()`
 - Coverage target: core business ≥ 80%
+- Before declaring work complete, run lint, type check, tests, and production build.
+- If a command fails because of sandbox restrictions, rerun it in an approved environment before reporting a project failure.
 
 ## Git Commit Convention
 
@@ -44,6 +49,7 @@ A tool can help to encode/decode base64 content, meanwhile support gzip->encode 
 - Subject ≤ 72 chars, imperative mood ("add" not "added")
 - Scope by module: `feat(auth):`
 - Breaking Change: footer with `BREAKING CHANGE:`
+- Do not commit generated artifacts or local tool state such as `.next/`, `node_modules/`, `tsconfig.tsbuildinfo`, `.idea/`, or `.claude/`.
 
 ## Build Commands
 

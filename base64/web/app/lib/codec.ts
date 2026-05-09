@@ -6,7 +6,7 @@ interface ConversionResult {
   error?: string;
 }
 
-function uint8ArrayToBase64(bytes: Uint8Array): string {
+function uint8ArrayToBase64(bytes: Uint8Array<ArrayBuffer>): string {
   let binary = "";
   for (let i = 0; i < bytes.length; i++) {
     binary += String.fromCharCode(bytes[i]);
@@ -14,7 +14,7 @@ function uint8ArrayToBase64(bytes: Uint8Array): string {
   return btoa(binary);
 }
 
-function base64ToUint8Array(base64: string): Uint8Array {
+function base64ToUint8Array(base64: string): Uint8Array<ArrayBuffer> {
   const binary = atob(base64);
   const bytes = new Uint8Array(binary.length);
   for (let i = 0; i < binary.length; i++) {
@@ -23,7 +23,7 @@ function base64ToUint8Array(base64: string): Uint8Array {
   return bytes;
 }
 
-async function gzipCompress(data: Uint8Array): Promise<Uint8Array> {
+async function gzipCompress(data: Uint8Array<ArrayBuffer>): Promise<Uint8Array<ArrayBuffer>> {
   const stream = new CompressionStream("gzip");
   const writer = stream.writable.getWriter();
   const reader = stream.readable.getReader();
@@ -50,7 +50,7 @@ async function gzipCompress(data: Uint8Array): Promise<Uint8Array> {
   return result;
 }
 
-async function gzipDecompress(data: Uint8Array): Promise<Uint8Array> {
+async function gzipDecompress(data: Uint8Array<ArrayBuffer>): Promise<Uint8Array<ArrayBuffer>> {
   const stream = new DecompressionStream("gzip");
   const writer = stream.writable.getWriter();
   const reader = stream.readable.getReader();
@@ -77,20 +77,16 @@ async function gzipDecompress(data: Uint8Array): Promise<Uint8Array> {
   return result;
 }
 
-async function encodeBytes(data: Uint8Array, useGzip: boolean): Promise<string> {
-  const base64String = uint8ArrayToBase64(data);
-  if (!useGzip) return base64String;
-  const base64Bytes = new TextEncoder().encode(base64String);
-  const compressed = await gzipCompress(base64Bytes);
+async function encodeBytes(data: Uint8Array<ArrayBuffer>, useGzip: boolean): Promise<string> {
+  if (!useGzip) return uint8ArrayToBase64(data);
+  const compressed = await gzipCompress(data);
   return uint8ArrayToBase64(compressed);
 }
 
-async function decodeToBytes(encoded: string, useGzip: boolean): Promise<Uint8Array> {
-  if (!useGzip) return base64ToUint8Array(encoded);
-  const compressedBytes = base64ToUint8Array(encoded);
-  const decompressed = await gzipDecompress(compressedBytes);
-  const base64String = new TextDecoder().decode(decompressed);
-  return base64ToUint8Array(base64String);
+async function decodeToBytes(encoded: string, useGzip: boolean): Promise<Uint8Array<ArrayBuffer>> {
+  const bytes = base64ToUint8Array(encoded);
+  if (!useGzip) return bytes;
+  return gzipDecompress(bytes);
 }
 
 async function encode(text: string, useGzip: boolean = true): Promise<string> {
@@ -128,7 +124,7 @@ async function convert(input: string, mode: Mode, useGzip: boolean = true): Prom
   }
 }
 
-function fileToUint8Array(file: File): Promise<Uint8Array> {
+function fileToUint8Array(file: File): Promise<Uint8Array<ArrayBuffer>> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = () => {
@@ -139,7 +135,7 @@ function fileToUint8Array(file: File): Promise<Uint8Array> {
   });
 }
 
-function downloadBytes(bytes: Uint8Array, filename: string): void {
+function downloadBytes(bytes: Uint8Array<ArrayBuffer>, filename: string): void {
   const blob = new Blob([bytes]);
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
