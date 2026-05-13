@@ -87,8 +87,6 @@ s3-migration/
         CheckpointLog.java
       metrics/
         MetricsEmitter.java
-        CloudWatchEmitter.java
-        NoopEmitter.java
     src/test/java/com/migration/s3/
       delta/ExternalSortDiffTest.java
       inventory/InventoryReaderTest.java
@@ -183,11 +181,6 @@ Defined in `common/pom.xml`:
   <version>1.12.750</version>
 </dependency>
 <dependency>
-  <groupId>software.amazon.awssdk</groupId>
-  <artifactId>cloudwatch</artifactId>
-  <version>2.26.0</version>
-</dependency>
-<dependency>
   <groupId>org.apache.commons</groupId>
   <artifactId>commons-csv</artifactId>
   <version>1.11.0</version>
@@ -247,7 +240,6 @@ java -jar migrate.jar [flags] [key-list-file]
 --failed-log-s3     S3 URI for failure log backup (default: s3://DST_BUCKET/migration-logs/<run>-failed.log)
 --stop-flag-key     Stop flag S3 key written to destination bucket; default migration-logs/STOP
 --dry-run           Decrypt and discard; do not PUT to destination
---metrics           Emit CloudWatch metrics in namespace S3Migration
 --verify-sample     Fraction of migrated keys to HEAD-verify; default 0.01
 --log-every         Progress log interval in keys; default 1000
 --failed-keys       Local path for failed key list (percent-encoded keys, ready for retry); default ./failed.keys
@@ -366,7 +358,7 @@ Because this migration only handles current versions, `ListObjectsV2` reconcilia
 | 2 | Emergency stop flag | Checked every 1,000 tasks for graceful drain without a kill signal |
 | 3 | Manifest availability polling | `ManifestLoader` retries with exponential backoff from 5 to 60 minutes |
 | 4 | Verification sampling | HEAD-check random destination samples after the worker pool drains |
-| 5 | CloudWatch metrics | `keys.attempted/succeeded/failed`, `bytes.decrypted`, `kms.src.decrypt.calls` (source Decrypt app-side count), `s3.put.requests`, `decrypt.duration_ms`, `put.duration_ms`; observe actual destination SSE-KMS calls through CloudTrail / KMS metrics |
+| 5 | Progress logging | Final stderr summary `attempted/succeeded/failed/oversized/skipped`; observe KMS call volume and throttling via CloudTrail / KMS console |
 | 6 | CSV MD5 validation | Detect corrupted inventory parts before processing |
 | 7 | Anomalous size detection | HEAD ≥ 5 GB objects are written to `failed.keys`, with `reason=oversized` recorded in `failed.log`; the business has confirmed such objects should not exist in the source bucket |
 | 8 | Structured failure log | `failed.keys` (percent-encoded key list for retry) + `failed.log` (percent-encoded-key, reason, timestamp for debugging) |
@@ -382,7 +374,6 @@ Because this migration only handles current versions, `ListObjectsV2` reconcilia
 - Inventory bucket: `s3:GetObject`
 - Source KMS key: `kms:Decrypt` (encryption context must match the object's `x-amz-matdesc`)
 - Destination KMS key: `kms:GenerateDataKey`, `kms:Encrypt`
-- CloudWatch: `cloudwatch:PutMetricData` (namespace `S3Migration`)
 - `s3:ListBucket` is NOT required (migrate.jar does not call `ListObjectsV2`)
 
 **Verification role** (runs `verify-listobjects-v2.py`):

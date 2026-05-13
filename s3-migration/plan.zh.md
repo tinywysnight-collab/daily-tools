@@ -87,8 +87,6 @@ s3-migration/
         CheckpointLog.java
       metrics/
         MetricsEmitter.java
-        CloudWatchEmitter.java
-        NoopEmitter.java
     src/test/java/com/migration/s3/
       delta/ExternalSortDiffTest.java
       inventory/InventoryReaderTest.java
@@ -183,11 +181,6 @@ Worker 随后调用普通 `AmazonS3Client` 将明文 stream + 业务元数据 `p
   <version>1.12.750</version>
 </dependency>
 <dependency>
-  <groupId>software.amazon.awssdk</groupId>
-  <artifactId>cloudwatch</artifactId>
-  <version>2.26.0</version>
-</dependency>
-<dependency>
   <groupId>org.apache.commons</groupId>
   <artifactId>commons-csv</artifactId>
   <version>1.11.0</version>
@@ -247,7 +240,6 @@ java -jar migrate.jar [参数] [key-list-file]
 --failed-log-s3     失败日志 S3 备份 URI（默认: s3://DST_BUCKET/migration-logs/<run>-failed.log）
 --stop-flag-key     停止标志 S3 key，写入目标桶（默认: migration-logs/STOP）
 --dry-run           解密但不 PUT 到目标桶
---metrics           上报 CloudWatch 指标（命名空间: S3Migration）
 --verify-sample     已迁移 key 的 HEAD 验证比例（默认: 0.01）
 --log-every         进度日志间隔（单位: key 数，默认: 1000）
 --failed-keys       失败 key 本地路径，percent-encoded key 列表，可直接重试（默认: ./failed.keys）
@@ -366,7 +358,7 @@ aws s3 cp s3://DST_BUCKET/some-key /tmp/check && file /tmp/check
 | 2 | 紧急停止标志 | 每处理 1,000 个任务检查一次，无需 kill 信号即可优雅排空 |
 | 3 | 清单可用性轮询 | `ManifestLoader` 以指数退避（5→10→20→…→60 分钟）重试 |
 | 4 | 验证采样 | 线程池排空后对目标桶中随机样本执行 HEAD 检查 |
-| 5 | CloudWatch 指标 | `keys.attempted/succeeded/failed`、`bytes.decrypted`、`kms.src.decrypt.calls`（源 Decrypt 应用侧计数）、`s3.put.requests`、`decrypt.duration_ms`、`put.duration_ms`；目标 SSE-KMS 的实际 KMS 调用量通过 CloudTrail / KMS metrics 观测 |
+| 5 | 进度日志 | 运行结束在 stderr 打印 `attempted/succeeded/failed/oversized/skipped` 汇总；KMS 调用量、限流情况通过 CloudTrail / KMS 控制台观测 |
 | 6 | CSV MD5 校验 | 处理前检测损坏的 inventory part |
 | 7 | 异常大小检测 | HEAD ≥ 5 GB 的对象写入 `failed.keys`，并在 `failed.log` 记录 `reason=oversized`；业务侧确认源桶不应存在此类对象 |
 | 8 | 结构化失败日志 | `failed.keys`（percent-encoded key 列表，可直接重试）+ `failed.log`（percent-encoded-key、reason、timestamp，供排查） |
@@ -382,7 +374,6 @@ aws s3 cp s3://DST_BUCKET/some-key /tmp/check && file /tmp/check
 - Inventory 桶：`s3:GetObject`
 - 源 KMS key：`kms:Decrypt`（加密上下文需与对象 `x-amz-matdesc` 匹配）
 - 目标 KMS key：`kms:GenerateDataKey`、`kms:Encrypt`
-- CloudWatch：`cloudwatch:PutMetricData`（namespace `S3Migration`）
 - 不需要 `s3:ListBucket`（migrate.jar 不调用 `ListObjectsV2`）
 
 **对账角色**（运行 `verify-listobjects-v2.py`）：

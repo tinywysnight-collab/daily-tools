@@ -3,7 +3,7 @@
 # Usage: run-daily.sh BASELINE_MANIFEST CURRENT_MANIFEST
 # Required env: SRC_BUCKET, DST_BUCKET, INV_BUCKET, KMS_KEY_ID, REGION
 # Optional env: CONCURRENCY (default 20), SCRATCH_DIR (default /mnt/scratch), SORT_MEM (default 20G),
-#               FILTER_SUFFIX (default empty), METRICS (default true)
+#               FILTER_SUFFIX (default empty)
 set -euo pipefail
 
 BASELINE_MANIFEST=${1:?baseline manifest s3:// URI required}
@@ -13,7 +13,6 @@ CONCURRENCY=${CONCURRENCY:-20}
 SCRATCH_DIR=${SCRATCH_DIR:-/mnt/scratch}
 SORT_MEM=${SORT_MEM:-20G}
 FILTER_SUFFIX=${FILTER_SUFFIX:-}
-METRICS=${METRICS:-true}
 
 RUN_TAG=delta-$(date -u +%Y-%m-%d)
 WORK_DIR=${SCRATCH_DIR}/${RUN_TAG}
@@ -32,9 +31,6 @@ java -Xmx4g -jar "${INV_DIFF_JAR}" \
   --filter-suffix "${FILTER_SUFFIX}" \
   --region "${REGION}"
 
-METRICS_FLAG=""
-[ "${METRICS}" = "true" ] && METRICS_FLAG="--metrics true"
-
 java -Xmx2g -jar "${MIGRATE_JAR}" \
   --src-bucket "${SRC_BUCKET}" \
   --dst-bucket "${DST_BUCKET}" \
@@ -43,7 +39,6 @@ java -Xmx2g -jar "${MIGRATE_JAR}" \
   --checkpoint "${WORK_DIR}/${RUN_TAG}-checkpoint.log" \
   --failed-keys "${WORK_DIR}/${RUN_TAG}-failed.keys" \
   --failed-log "${WORK_DIR}/${RUN_TAG}-failed.log" \
-  ${METRICS_FLAG} \
   --region "${REGION}" \
   "${WORK_DIR}/delta.keys"
 

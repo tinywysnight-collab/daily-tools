@@ -2,7 +2,7 @@
 # Full migration (T-7 / T-14): inventory-diff in full mode, then migrate every current key.
 # Required env: SRC_BUCKET, DST_BUCKET, INV_BUCKET, KMS_KEY_ID, REGION, CURRENT_MANIFEST (s3:// URI)
 # Optional env: CONCURRENCY (default 50), SCRATCH_DIR (default /mnt/scratch), SORT_MEM (default 20G),
-#               FILTER_SUFFIX (default empty), METRICS (default true)
+#               FILTER_SUFFIX (default empty)
 set -euo pipefail
 
 : "${SRC_BUCKET:?}"; : "${DST_BUCKET:?}"; : "${INV_BUCKET:?}"; : "${KMS_KEY_ID:?}"
@@ -11,7 +11,6 @@ CONCURRENCY=${CONCURRENCY:-50}
 SCRATCH_DIR=${SCRATCH_DIR:-/mnt/scratch}
 SORT_MEM=${SORT_MEM:-20G}
 FILTER_SUFFIX=${FILTER_SUFFIX:-}
-METRICS=${METRICS:-true}
 
 RUN_TAG=t7-$(date -u +%Y%m%d)
 WORK_DIR=${SCRATCH_DIR}/${RUN_TAG}
@@ -29,9 +28,6 @@ java -Xmx4g -jar "${INV_DIFF_JAR}" \
   --filter-suffix "${FILTER_SUFFIX}" \
   --region "${REGION}"
 
-METRICS_FLAG=""
-[ "${METRICS}" = "true" ] && METRICS_FLAG="--metrics true"
-
 java -Xmx2g -jar "${MIGRATE_JAR}" \
   --src-bucket "${SRC_BUCKET}" \
   --dst-bucket "${DST_BUCKET}" \
@@ -40,7 +36,6 @@ java -Xmx2g -jar "${MIGRATE_JAR}" \
   --checkpoint "${WORK_DIR}/${RUN_TAG}-checkpoint.log" \
   --failed-keys "${WORK_DIR}/${RUN_TAG}-failed.keys" \
   --failed-log "${WORK_DIR}/${RUN_TAG}-failed.log" \
-  ${METRICS_FLAG} \
   --region "${REGION}" \
   "${WORK_DIR}/baseline.keys"
 

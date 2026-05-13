@@ -7,14 +7,11 @@ import com.amazonaws.services.s3.model.CryptoConfiguration;
 import com.amazonaws.services.s3.model.CryptoMode;
 import com.amazonaws.services.s3.model.KMSEncryptionMaterialsProvider;
 import com.migration.s3.checkpoint.CheckpointLog;
-import com.migration.s3.metrics.CloudWatchEmitter;
 import com.migration.s3.metrics.MetricsEmitter;
 import com.migration.s3.worker.BackoffPolicy;
 import com.migration.s3.worker.FailedLog;
 import com.migration.s3.worker.MigrationWorker;
 import com.migration.s3.worker.WorkerPool;
-import software.amazon.awssdk.regions.Region;
-import software.amazon.awssdk.services.cloudwatch.CloudWatchClient;
 
 import java.io.BufferedReader;
 import java.io.IOException;
@@ -56,7 +53,7 @@ public final class MigrateMain {
         AmazonS3 src = buildS3(a.region);
         AmazonS3 dst = buildS3(a.region);
         AmazonS3 srcEnc = buildEncryptionClient(a.region, a.kmsKeyId);
-        MetricsEmitter metrics = buildMetrics(a);
+        MetricsEmitter metrics = MetricsEmitter.noop();
 
         try (CheckpointLog checkpoint = CheckpointLog.open(a.checkpointFile);
              FailedLog failed = FailedLog.open(a.failedKeysFile, a.failedLogFile)) {
@@ -112,18 +109,7 @@ public final class MigrateMain {
             if (stop.get()) return 3;
             if (summary.failed() > 0 || summary.oversized() > 0) return 2;
             return 0;
-        } finally {
-            if (metrics instanceof AutoCloseable c) {
-                try { c.close(); } catch (Exception ignore) {}
-            }
         }
-    }
-
-    private static MetricsEmitter buildMetrics(Args a) {
-        if (!a.metricsEnabled) return MetricsEmitter.noop();
-        var b = CloudWatchClient.builder();
-        if (a.region != null) b.region(Region.of(a.region));
-        return new CloudWatchEmitter(b.build(), "S3Migration");
     }
 
     private static AmazonS3 buildS3(String region) {
@@ -190,7 +176,7 @@ public final class MigrateMain {
     record Args(String srcBucket, String dstBucket, String kmsKeyId,
                 int concurrency,
                 Path checkpointFile, Path failedKeysFile, Path failedLogFile,
-                String stopFlagKey, boolean metricsEnabled,
+                String stopFlagKey,
                 String region, Path keyListFile) {}
 
     static Args parseArgs(String[] argv) {
@@ -220,10 +206,9 @@ public final class MigrateMain {
         Path failedKeys = Paths.get(opts.getOrDefault("failed-keys", "./failed.keys"));
         Path failedLog = Paths.get(opts.getOrDefault("failed-log", "./failed.log"));
         String stopFlag = opts.getOrDefault("stop-flag-key", STOP_FLAG_KEY_DEFAULT);
-        boolean metrics = "true".equals(opts.get("metrics"));
         String region = opts.get("region");
         return new Args(srcBucket, dstBucket, kmsKeyId, concurrency,
-                ckpt, failedKeys, failedLog, stopFlag, metrics, region, positional);
+                ckpt, failedKeys, failedLog, stopFlag, region, positional);
     }
 
     private static String required(Map<String, String> opts, String key) {
