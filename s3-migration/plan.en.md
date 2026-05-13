@@ -144,6 +144,10 @@ For a full run, omit `--baseline`; `inventory-diff` outputs the normalized and s
 
 The worker then uses a regular `AmazonS3Client` to `putObject` to the destination bucket without client-side encryption.
 
+**Oversized file handling**: Before GET, issue a HEAD request to obtain `Content-Length`. If the object is `>= 5 GB`, skip it, append `key\tsize\ttimestamp` to `oversized.log`, increment the `keys.skipped` metric, and continue without treating it as a failure.
+
+**Failure logging**: When any key fails during decryption or PUT, append `key\treason\ttimestamp` to `failed.log`. The total failure count is written to stderr on exit. `failed.log` can be fed directly as input to the next `migrate.jar` run for retries.
+
 ## Maven Dependencies
 
 Defined in `common/pom.xml`:
@@ -226,6 +230,8 @@ java -jar migrate.jar [flags] [key-list-file]
 --metrics           Emit CloudWatch metrics in namespace S3Migration
 --verify-sample     Fraction of migrated keys to HEAD-verify; default 0.01
 --log-every         Progress log interval in keys; default 1000
+--oversized-log     Path for oversized-file log (>= 5 GB); default ./oversized.log
+--failed-log        Path for per-key failure log; default ./failed.log
 --region
 --profile
 ```
@@ -327,6 +333,8 @@ Because this migration only handles current versions, `ListObjectsV2` reconcilia
 | 4 | Verification sampling | HEAD-check random destination samples after the worker pool drains |
 | 5 | CloudWatch metrics | `keys.attempted/succeeded/failed/skipped`, `bytes.decrypted`, `kms.calls`, `decrypt.duration_ms` |
 | 6 | CSV MD5 validation | Detect corrupted inventory parts before processing |
+| 7 | Oversized file log | HEAD before GET; objects >= 5 GB are written to `oversized.log` (key, size, timestamp) and counted as `keys.skipped` without interrupting the run |
+| 8 | Structured failure log | Every failed key is appended to `failed.log` (key, reason, timestamp); the file can be fed directly as input to the next run for retries |
 
 ## Constraints TBD
 

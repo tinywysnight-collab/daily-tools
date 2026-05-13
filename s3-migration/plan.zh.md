@@ -144,6 +144,10 @@ comm -13 baseline.sorted current.sorted \
 
 Worker 随后调用普通 `AmazonS3Client` 将对象 `putObject` 到目标桶（不做客户端加密）。
 
+**大文件跳过**：GET 前先 HEAD 获取 `Content-Length`。若 `>= 5 GB`，跳过该对象，将 `key\tsize\ttimestamp` 追加到 `oversized.log`，计入 `keys.skipped` 指标，不视为失败。
+
+**失败日志**：任何 key 解密或 PUT 失败时，将 `key\treason\ttimestamp` 追加到 `failed.log`。进程结束时将失败 key 数量输出到 stderr；`failed.log` 可直接作为下次 `migrate.jar` 的输入用于重试。
+
 ## Maven 依赖
 
 `common/pom.xml` 中定义：
@@ -226,6 +230,8 @@ java -jar migrate.jar [参数] [key-list-file]
 --metrics           上报 CloudWatch 指标（命名空间: S3Migration）
 --verify-sample     已迁移 key 的 HEAD 验证比例（默认: 0.01）
 --log-every         进度日志间隔（单位: key 数，默认: 1000）
+--oversized-log     大文件（≥ 5 GB）记录路径（默认: ./oversized.log）
+--failed-log        失败 key 记录路径（默认: ./failed.log）
 --region
 --profile
 ```
@@ -327,6 +333,8 @@ python3 scripts/verify-listobjects-v2.py \
 | 4 | 验证采样 | 线程池排空后对目标桶中随机样本执行 HEAD 检查 |
 | 5 | CloudWatch 指标 | `keys.attempted/succeeded/failed/skipped`、`bytes.decrypted`、`kms.calls`、`decrypt.duration_ms` |
 | 6 | CSV MD5 校验 | 处理前检测损坏的 inventory part |
+| 7 | 大文件跳过日志 | GET 前 HEAD 检查；≥ 5 GB 的对象写入 `oversized.log`（key、size、timestamp），计入 `keys.skipped`，不中断主流程 |
+| 8 | 结构化失败日志 | 每个失败 key 写入 `failed.log`（key、reason、timestamp）；文件可直接作为下次运行的输入用于重试 |
 
 ## 待补充约束
 
