@@ -226,7 +226,8 @@ java -jar migrate.jar [参数] [key-list-file]
 --checkpoint-s3     检查点 S3 备份 URI（默认: s3://DST_BUCKET/migration-logs/<run>-checkpoint.log）
 --oversized-log-s3  大文件日志 S3 备份 URI（默认: s3://DST_BUCKET/migration-logs/<run>-oversized.log）
 --failed-log-s3     失败日志 S3 备份 URI（默认: s3://DST_BUCKET/migration-logs/<run>-failed.log）
---stop-flag-key     停止标志 S3 key，写入目标桶（默认: migration-logs/STOP）
+--stop-flag-bucket  紧急停止标志所在桶（必填）
+--stop-flag-key     停止标志 S3 key（默认: migration/STOP）
 --dry-run           解密但不 PUT 到目标桶
 --metrics           上报 CloudWatch 指标（命名空间: S3Migration）
 --verify-sample     已迁移 key 的 HEAD 验证比例（默认: 0.01）
@@ -259,7 +260,7 @@ key 列表从位置参数文件或 stdin 读取。
     delta-YYYY-MM-DD-failed.log
   ```
 - 启动时：若本地文件不存在，从 S3 下载
-- 紧急停止：`aws s3 cp /dev/null s3://DST_BUCKET/migration/STOP`，worker 每处理 1,000 个任务检查一次
+- 紧急停止：`aws s3 cp /dev/null s3://STOP_BUCKET/migration/STOP`，worker 每处理 1,000 个任务检查一次
 - **注意**：`ListObjectsV2` 对账时须通过 `--dst-prefix` 排除 `migration-logs/` 前缀，避免日志文件出现在 `extra-in-destination.txt`
 
 ## Makefile 目标

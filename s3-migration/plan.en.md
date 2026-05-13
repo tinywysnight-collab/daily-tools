@@ -226,7 +226,8 @@ java -jar migrate.jar [flags] [key-list-file]
 --checkpoint-s3     S3 URI for checkpoint backup (default: s3://DST_BUCKET/migration-logs/<run>-checkpoint.log)
 --oversized-log-s3  S3 URI for oversized-file log backup (default: s3://DST_BUCKET/migration-logs/<run>-oversized.log)
 --failed-log-s3     S3 URI for failure log backup (default: s3://DST_BUCKET/migration-logs/<run>-failed.log)
---stop-flag-key     Stop flag S3 key written to destination bucket; default migration-logs/STOP
+--stop-flag-bucket  Bucket for the emergency stop flag; required
+--stop-flag-key     Stop flag S3 key; default migration/STOP
 --dry-run           Decrypt and discard; do not PUT to destination
 --metrics           Emit CloudWatch metrics in namespace S3Migration
 --verify-sample     Fraction of migrated keys to HEAD-verify; default 0.01
@@ -259,7 +260,7 @@ The key list is read from the positional file argument or stdin.
     delta-YYYY-MM-DD-failed.log
   ```
 - On startup, download the checkpoint from S3 if the local file is absent.
-- Emergency stop: `aws s3 cp /dev/null s3://DST_BUCKET/migration-logs/STOP`; workers poll every 1,000 tasks.
+- Emergency stop: `aws s3 cp /dev/null s3://STOP_BUCKET/migration/STOP`; workers poll every 1,000 tasks.
 - **Note**: the `ListObjectsV2` reconciliation script must use `--dst-prefix` to exclude the `migration-logs/` prefix so log files do not appear in `extra-in-destination.txt`.
 
 ## Makefile Targets
