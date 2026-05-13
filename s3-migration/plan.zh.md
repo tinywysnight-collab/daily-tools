@@ -223,15 +223,16 @@ java -jar migrate.jar [参数] [key-list-file]
 --dst-bucket        明文目标桶（必填）
 --concurrency       并行 worker 线程数（默认: 20；T-7 使用 50）
 --checkpoint        本地检查点文件（默认: ./checkpoint.log）
---checkpoint-s3     检查点 S3 备份 URI
---stop-flag-bucket  紧急停止标志所在桶
---stop-flag-key     停止标志 S3 key（默认: migration/STOP）
+--checkpoint-s3     检查点 S3 备份 URI（默认: s3://DST_BUCKET/migration-logs/<run>-checkpoint.log）
+--oversized-log-s3  大文件日志 S3 备份 URI（默认: s3://DST_BUCKET/migration-logs/<run>-oversized.log）
+--failed-log-s3     失败日志 S3 备份 URI（默认: s3://DST_BUCKET/migration-logs/<run>-failed.log）
+--stop-flag-key     停止标志 S3 key，写入目标桶（默认: migration-logs/STOP）
 --dry-run           解密但不 PUT 到目标桶
 --metrics           上报 CloudWatch 指标（命名空间: S3Migration）
 --verify-sample     已迁移 key 的 HEAD 验证比例（默认: 0.01）
 --log-every         进度日志间隔（单位: key 数，默认: 1000）
---oversized-log     大文件（≥ 5 GB）记录路径（默认: ./oversized.log）
---failed-log        失败 key 记录路径（默认: ./failed.log）
+--oversized-log     大文件（≥ 5 GB）本地记录路径（默认: ./oversized.log）
+--failed-log        失败 key 本地记录路径（默认: ./failed.log）
 --region
 --profile
 ```
@@ -247,8 +248,19 @@ key 列表从位置参数文件或 stdin 读取。
 - 内存估算：1000 万 key × 平均约 80 字节 ≈ ~800 MB JVM 堆；使用 `-Xmx2g`
 - 每 100 次完成或每 5 秒（后台线程）刷新到本地文件
 - 每 10,000 次完成或每 10 分钟同步到 S3
+- checkpoint、`oversized.log`、`failed.log` 均备份到目标桶的 `migration-logs/` 前缀下，与业务对象隔离：
+  ```
+  s3://DST_BUCKET/migration-logs/
+    t7-checkpoint.log
+    t7-oversized.log
+    t7-failed.log
+    delta-YYYY-MM-DD-checkpoint.log
+    delta-YYYY-MM-DD-oversized.log
+    delta-YYYY-MM-DD-failed.log
+  ```
 - 启动时：若本地文件不存在，从 S3 下载
-- 紧急停止：`aws s3 cp /dev/null s3://STOP_BUCKET/migration/STOP`，worker 每处理 1,000 个任务检查一次
+- 紧急停止：`aws s3 cp /dev/null s3://DST_BUCKET/migration/STOP`，worker 每处理 1,000 个任务检查一次
+- **注意**：`ListObjectsV2` 对账时须通过 `--dst-prefix` 排除 `migration-logs/` 前缀，避免日志文件出现在 `extra-in-destination.txt`
 
 ## Makefile 目标
 

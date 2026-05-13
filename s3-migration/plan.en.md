@@ -223,15 +223,16 @@ java -jar migrate.jar [flags] [key-list-file]
 --dst-bucket        Plaintext destination bucket; required
 --concurrency       Worker threads; default 20, use 50 for T-7
 --checkpoint        Local checkpoint file; default ./checkpoint.log
---checkpoint-s3     S3 URI for checkpoint backup
---stop-flag-bucket  Bucket containing the emergency stop object
---stop-flag-key     Stop flag S3 key; default migration/STOP
+--checkpoint-s3     S3 URI for checkpoint backup (default: s3://DST_BUCKET/migration-logs/<run>-checkpoint.log)
+--oversized-log-s3  S3 URI for oversized-file log backup (default: s3://DST_BUCKET/migration-logs/<run>-oversized.log)
+--failed-log-s3     S3 URI for failure log backup (default: s3://DST_BUCKET/migration-logs/<run>-failed.log)
+--stop-flag-key     Stop flag S3 key written to destination bucket; default migration-logs/STOP
 --dry-run           Decrypt and discard; do not PUT to destination
 --metrics           Emit CloudWatch metrics in namespace S3Migration
 --verify-sample     Fraction of migrated keys to HEAD-verify; default 0.01
 --log-every         Progress log interval in keys; default 1000
---oversized-log     Path for oversized-file log (>= 5 GB); default ./oversized.log
---failed-log        Path for per-key failure log; default ./failed.log
+--oversized-log     Local path for oversized-file log (>= 5 GB); default ./oversized.log
+--failed-log        Local path for per-key failure log; default ./failed.log
 --region
 --profile
 ```
@@ -247,8 +248,19 @@ The key list is read from the positional file argument or stdin.
 - Memory estimate: 10M keys × ~80 bytes average ≈ ~800 MB JVM heap; use `-Xmx2g`.
 - Flush to local file every 100 completions or every 5 seconds.
 - Sync to S3 every 10,000 completions or every 10 minutes.
+- The checkpoint, `oversized.log`, and `failed.log` are all backed up to the destination bucket under the `migration-logs/` prefix to keep them separate from business objects:
+  ```
+  s3://DST_BUCKET/migration-logs/
+    t7-checkpoint.log
+    t7-oversized.log
+    t7-failed.log
+    delta-YYYY-MM-DD-checkpoint.log
+    delta-YYYY-MM-DD-oversized.log
+    delta-YYYY-MM-DD-failed.log
+  ```
 - On startup, download the checkpoint from S3 if the local file is absent.
-- Emergency stop: `aws s3 cp /dev/null s3://STOP_BUCKET/migration/STOP`; workers poll every 1,000 tasks.
+- Emergency stop: `aws s3 cp /dev/null s3://DST_BUCKET/migration-logs/STOP`; workers poll every 1,000 tasks.
+- **Note**: the `ListObjectsV2` reconciliation script must use `--dst-prefix` to exclude the `migration-logs/` prefix so log files do not appear in `extra-in-destination.txt`.
 
 ## Makefile Targets
 
