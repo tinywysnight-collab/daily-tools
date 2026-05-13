@@ -10,12 +10,15 @@ externally sorts them, and produces:
 Use --exclude-dst-prefix to skip operational prefixes (e.g. migration-logs/)
 that live in the destination bucket alongside migrated objects.
 
-Use --oversized-keys to supply a file of known-skipped large keys (one
-percent-encoded key per line). Those keys are subtracted from the expected
-source set so they do not appear as missing.
+If the source CSE envelope uses .instruction sidecar objects, pass
+--exclude-src-suffix .instruction and --exclude-dst-suffix .instruction so
+sidecar files are not treated as business objects.
 
 It verifies current object keys only. It does not verify source version history;
-use ListVersions for that if preserving every historical version matters.
+use ListObjectVersions for that if preserving every historical version matters.
+
+Note: source-side deletions are not propagated to the destination, so
+extra-in-destination.txt is expected to be non-empty and is not a failure.
 """
 
 from __future__ import annotations
@@ -50,9 +53,14 @@ def parse_args() -> argparse.Namespace:
         help="Skip destination keys that start with this prefix (default: migration-logs/).",
     )
     parser.add_argument(
-        "--oversized-keys",
-        help="File of percent-encoded keys (one per line) that were intentionally skipped "
-             "as oversized. These are excluded from the expected source set.",
+        "--exclude-src-suffix",
+        default="",
+        help="Skip source keys that end with this suffix, e.g. .instruction.",
+    )
+    parser.add_argument(
+        "--exclude-dst-suffix",
+        default="",
+        help="Skip destination keys that end with this suffix, e.g. .instruction.",
     )
     parser.add_argument("--workdir", default="./verify-work")
     parser.add_argument("--profile")
@@ -60,11 +68,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--page-size", type=int, default=1000)
     parser.add_argument("--sort-mem", default="20G")
     parser.add_argument("--sort-parallel", type=int, default=os.cpu_count() or 1)
-    parser.add_argument(
-        "--fail-on-extra",
-        action="store_true",
-        help="Exit non-zero when destination contains keys that are not in source.",
-    )
     return parser.parse_args()
 
 
@@ -77,6 +80,7 @@ def list_keys(
     bucket: str,
     prefix: str,
     exclude_prefix: str,
+    exclude_suffix: str,
     page_size: int,
     out_path: Path,
 ) -> int:
@@ -93,7 +97,9 @@ def list_keys(
             for obj in page.get("Contents", []):
                 if exclude_prefix and obj["Key"].startswith(exclude_prefix):
                     continue
-                # Percent-encode so unusual keys with newlines remain one record per line.
+                if exclude_suffix and obj["Key"].endswith(exclude_suffix):
+                    continue
+                # RFC3986 percent-encode so unusual keys remain one record per line.
                 out.write(quote(obj["Key"], safe="/") + "\n")
                 count += 1
                 if count % 100000 == 0:
@@ -129,17 +135,6 @@ def sort_unique(raw_path: Path, sorted_path: Path, tmp_dir: Path, args: argparse
         run(base_cmd, env=env)
 
 
-def subtract_file(minuend: Path, subtrahend: Path, result: Path, tmp_dir: Path, args: argparse.Namespace) -> None:
-    """Write lines in minuend that are not in subtrahend into result."""
-    env = os.environ.copy()
-    env["LC_ALL"] = "C"
-    subtrahend_sorted = tmp_dir / "subtrahend.sorted"
-    sort_unique(subtrahend, subtrahend_sorted, tmp_dir, args)
-    with result.open("w", encoding="utf-8", newline="\n") as out:
-        subprocess.run(["comm", "-23", str(minuend), str(subtrahend_sorted)],
-                       check=True, stdout=out, env=env)
-
-
 def comm(left: Path, right: Path, out_path: Path, flags: str) -> int:
     env = os.environ.copy()
     env["LC_ALL"] = "C"
@@ -172,25 +167,16 @@ def main() -> int:
 
     session = session_for(args)
     src_count = list_keys(session, args.src_bucket, args.src_prefix,
-                          "", args.page_size, src_raw)
+                          "", args.exclude_src_suffix, args.page_size, src_raw)
     dst_count = list_keys(session, args.dst_bucket, args.dst_prefix,
-                          args.exclude_dst_prefix, args.page_size, dst_raw)
+                          args.exclude_dst_prefix, args.exclude_dst_suffix,
+                          args.page_size, dst_raw)
 
     sort_unique(src_raw, src_sorted, tmp_dir, args)
     sort_unique(dst_raw, dst_sorted, tmp_dir, args)
 
-    # If oversized keys were intentionally skipped, subtract them from the
-    # expected source set so they don't appear as missing.
-    effective_src = src_sorted
-    if args.oversized_keys:
-        oversized_path = Path(args.oversized_keys)
-        effective_src = workdir / "source.expected.sorted"
-        subtract_file(src_sorted, oversized_path, effective_src, tmp_dir, args)
-        oversized_count = src_count - sum(1 for _ in effective_src.open())
-        print(f"oversized_keys_excluded={oversized_count}", file=sys.stderr)
-
-    missing_count = comm(effective_src, dst_sorted, missing, "-23")
-    extra_count = comm(effective_src, dst_sorted, extra, "-13")
+    missing_count = comm(src_sorted, dst_sorted, missing, "-23")
+    extra_count = comm(src_sorted, dst_sorted, extra, "-13")
 
     print(f"source_current_keys={src_count}")
     print(f"destination_current_keys={dst_count}")
@@ -199,8 +185,6 @@ def main() -> int:
 
     if missing_count > 0:
         return 2
-    if args.fail_on_extra and extra_count > 0:
-        return 3
     return 0
 
 
