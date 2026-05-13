@@ -101,9 +101,9 @@ s3-migration/
 S3 Inventory does not guarantee key order, so two manifests cannot be diffed directly with a two-pointer merge. The correct flow is:
 
 1. `InventoryStream` iterates all gzipped CSV parts listed in `manifest.json`.
-2. Parse CSV fields and URL-decode the object key.
+2. Parse CSV fields, URL-decode the object key, then percent-encode it before writing to any internal file (`%09` for tab, `%0A` for newline). All internal files (records, checkpoint, failed.keys, oversized.log) use percent-encoded keys. Decode back to the raw key only when calling the S3 API.
 3. Configure Inventory as `Current version only`; historical versions and delete markers are not migrated.
-4. Emit comparison record: `key<TAB>etag<TAB>size<TAB>lastModified`. This captures both new keys and same-key overwrites.
+4. Emit comparison record: `percent-encoded-key<TAB>etag<TAB>size<TAB>lastModified`. This captures both new keys and same-key overwrites.
 5. Externally sort on EC2 local NVMe/EBS scratch, for example `LC_ALL=C sort -S 24G --parallel=$(nproc) -T /mnt/scratch -u`.
 6. Run a sorted set difference and output `current - baseline`.
 7. Project the delta back to keys and deduplicate keys; if the same key changed multiple times, only the final current version needs migration.
@@ -129,7 +129,7 @@ Output: keys that exist in `current` but not in `baseline`, one key per line.
 
 For a full run, omit `--baseline`; `inventory-diff` outputs the normalized and sorted key list from the current manifest.
 
-**URL-encoded keys**: S3 Inventory URL-encodes keys that contain special characters. Decode with `URLDecoder.decode(key, StandardCharsets.UTF_8)` before comparison and output.
+**Key encoding convention**: S3 Inventory URL-encodes special characters (using `+` for spaces). Read with `URLDecoder.decode`, then re-encode with percent-encoding before writing to all internal files. `cut -f1` on TAB-separated records is safe because keys never contain a literal tab. Decode back to the raw key only immediately before S3 API calls.
 
 **Current-version scope**: The migration copies only the source bucket's current versions. If the source bucket has versioning enabled, historical versions and delete markers are out of scope. The destination bucket gets its own new version history through PUT operations.
 
@@ -144,9 +144,13 @@ For a full run, omit `--baseline`; `inventory-diff` outputs the normalized and s
 
 The worker then uses a regular `AmazonS3Client` to `putObject` to the destination bucket without client-side encryption.
 
-**Oversized file handling**: Before GET, issue a HEAD request to obtain `Content-Length`. If the object is `>= 5 GB`, skip it, append `key\tsize\ttimestamp` to `oversized.log`, increment the `keys.skipped` metric, and continue without treating it as a failure.
+**Oversized file handling**: Before GET, issue a HEAD request to obtain `Content-Length`. If the object is `>= 5 GB`, skip it, append `percent-encoded-key\tsize\ttimestamp` to `oversized.log`, increment the `keys.skipped` metric, and continue without treating it as a failure. Oversized files are **formal exceptions**: the final ListObjectsV2 reconciliation must pass `--oversized-keys` (a plain key list extracted from `oversized.log`) to subtract them from the expected source set, or they will appear in `missing-in-destination.txt`.
 
-**Failure logging**: When any key fails during decryption or PUT, append `key\treason\ttimestamp` to `failed.log`. The total failure count is written to stderr on exit. `failed.log` can be fed directly as input to the next `migrate.jar` run for retries.
+**Failure logging**: Two separate files:
+- `failed.keys`: one percent-encoded key per line; feed directly to the next `migrate.jar` run for retries.
+- `failed.log`: `percent-encoded-key\treason\ttimestamp` for debugging; not used as direct input.
+
+The total failure count is written to stderr on exit.
 
 ## Maven Dependencies
 
@@ -231,8 +235,11 @@ java -jar migrate.jar [flags] [key-list-file]
 --metrics           Emit CloudWatch metrics in namespace S3Migration
 --verify-sample     Fraction of migrated keys to HEAD-verify; default 0.01
 --log-every         Progress log interval in keys; default 1000
---oversized-log     Local path for oversized-file log (>= 5 GB); default ./oversized.log
---failed-log        Local path for per-key failure log; default ./failed.log
+--oversized-log     Local TSV path for oversized-file log (>= 5 GB); default ./oversized.log
+--oversized-log-s3  S3 URI for oversized-file log backup
+--failed-keys       Local path for failed key list (plain keys, ready for retry); default ./failed.keys
+--failed-log        Local TSV path for failure details; default ./failed.log
+--failed-log-s3     S3 URI for failure log backup
 --region
 --profile
 ```
@@ -301,39 +308,42 @@ On crash, rerun the same command. The checkpoint skips completed keys.
 
 ### T+2 Final Verification
 
-```bash
-java -jar inventory-diff.jar \
-  --baseline-manifest s3://INV_BUCKET/.../t-7/manifest.json \
-  --current-manifest  s3://INV_BUCKET/.../t+2/manifest.json \
-  --inventory-bucket INV_BUCKET | wc -l
+**The only acceptance criterion is `ListObjectsV2` reconciliation with `missing-in-destination=0`.**
 
-sort t7-checkpoint.log delta-*.log | uniq | wc -l
-
-java -jar migrate.jar --dry-run --src-bucket SRC --dst-bucket DST missing-keys.txt
-
-aws s3 cp s3://DST_BUCKET/some-key /tmp/check && file /tmp/check
-```
-
-### Full Key Reconciliation with ListObjectsV2
-
-After confirming there are no new writes at T, scan current key sets in the source and destination buckets, externally sort them, and run a set difference:
+Checkpoint counts and inventory diff line counts are for reference only (they include retries and overwrites and do not equal the current key set).
 
 ```bash
+# 1. Extract plain key list from oversized logs (formal exceptions to subtract)
+cut -f1 s3://DST_BUCKET/migration-logs/t7-oversized.log > /tmp/oversized.keys
+for f in s3://DST_BUCKET/migration-logs/delta-*-oversized.log; do
+  aws s3 cp "$f" - | cut -f1 >> /tmp/oversized.keys
+done
+
+# 2. Full ListObjectsV2 reconciliation — exclude migration-logs/ and subtract oversized keys
 python3 scripts/verify-listobjects-v2.py \
   --src-bucket SRC_BUCKET \
   --dst-bucket DST_BUCKET \
+  --exclude-dst-prefix migration-logs/ \
+  --oversized-keys /tmp/oversized.keys \
   --workdir /mnt/scratch/verify \
   --sort-mem 20G \
   --sort-parallel "$(nproc)" \
   --region REGION
+
+# 3. Re-run migration for any missing keys
+java -jar migrate.jar --src-bucket SRC --dst-bucket DST \
+  /mnt/scratch/verify/missing-in-destination.txt
+
+# 4. Spot-check plaintext in destination
+aws s3 cp s3://DST_BUCKET/some-key /tmp/check && file /tmp/check
 ```
 
 Outputs:
 
-- `missing-in-destination.txt`: source current keys absent from destination; must be 0.
-- `extra-in-destination.txt`: destination keys absent from source; usually for manual review.
+- `missing-in-destination.txt`: **must be 0**; if not, run step 3.
+- `extra-in-destination.txt`: destination keys not in source; for manual review.
 
-Because this migration only handles current versions, `ListObjectsV2` reconciliation matches the migration scope. It verifies key coverage; for content verification, download a sample and compare size/hash.
+Because this migration only handles current versions, `ListObjectsV2` reconciliation matches the migration scope exactly.
 
 ## Additional Features
 
@@ -345,8 +355,8 @@ Because this migration only handles current versions, `ListObjectsV2` reconcilia
 | 4 | Verification sampling | HEAD-check random destination samples after the worker pool drains |
 | 5 | CloudWatch metrics | `keys.attempted/succeeded/failed/skipped`, `bytes.decrypted`, `kms.calls`, `decrypt.duration_ms` |
 | 6 | CSV MD5 validation | Detect corrupted inventory parts before processing |
-| 7 | Oversized file log | HEAD before GET; objects >= 5 GB are written to `oversized.log` (key, size, timestamp) and counted as `keys.skipped` without interrupting the run |
-| 8 | Structured failure log | Every failed key is appended to `failed.log` (key, reason, timestamp); the file can be fed directly as input to the next run for retries |
+| 7 | Oversized file log | HEAD before GET; objects >= 5 GB written to `oversized.log` (percent-encoded-key, size, timestamp), counted as `keys.skipped`; pass `--oversized-keys` to the reconciliation script to subtract them from the expected set |
+| 8 | Structured failure log | `failed.keys` (plain key list for retry) + `failed.log` (percent-encoded-key, reason, timestamp for debugging) |
 
 ## Constraints TBD
 

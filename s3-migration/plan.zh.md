@@ -101,9 +101,9 @@ s3-migration/
 S3 Inventory 不保证对象 key 的输出顺序。因此不能直接对两个 manifest 做双指针归并。正确流程是：
 
 1. `InventoryStream` 按 `manifest.json` 遍历所有 gzipped CSV part，逐行流式读取。
-2. 解析 CSV 字段，URL decode key。
+2. 解析 CSV 字段，URL decode key，再 percent-encode 后写入内部文件（`%09` 代替 tab，`%0A` 代替换行），确保含特殊字符的 key 不破坏 TSV/行分隔格式。所有内部文件（records、checkpoint、failed.keys、oversized.log）均使用 percent-encoded key；仅在调用 S3 API 前 decode。
 3. Inventory 配置为 `Current version only`，不迁移历史版本和 delete marker。
-4. 输出比较记录：`key<TAB>etag<TAB>size<TAB>lastModified`。这样新增 key 和同名 overwrite 都会进入增量。
+4. 输出比较记录：`percent-encoded-key<TAB>etag<TAB>size<TAB>lastModified`。这样新增 key 和同名 overwrite 都会进入增量。
 5. 使用 EC2 本地 NVMe/EBS scratch 目录运行外部排序，例如 `LC_ALL=C sort -S 24G --parallel=$(nproc) -T /mnt/scratch -u`。
 6. 对两个已排序文件做集合差分，输出 `current - baseline`。
 7. 将差分结果投影回 key，并对 key 去重；同一个 key 多次变化时只需要迁移最终 current version。
@@ -129,7 +129,7 @@ comm -13 baseline.sorted current.sorted \
 
 全量运行时：调用 `inventory-diff` 时不传 `--baseline` 参数，输出当前清单规范化并排序后的全部 key。
 
-**URL 编码 key**：S3 Inventory 会对含特殊字符的 key 进行 URL 编码。比较和输出前需用 `URLDecoder.decode(key, StandardCharsets.UTF_8)` 解码。
+**Key 编码规范**：S3 Inventory 对特殊字符使用 URL 编码（`+` 表示空格）。读取后先用 `URLDecoder.decode` 还原原始 key，再用 `URLEncoder.encode` / `%XX` percent-encode 后写入所有内部文件。`cut -f1` 取第一列时不会因 key 含 tab 而错位。调用 S3 API（`getObject`/`putObject`）前再 decode 回原始 key。
 
 **当前版本限定**：本迁移只复制源桶当前版本。若源桶开启 versioning，历史版本和 delete marker 不进入迁移范围；目标桶按新 PUT 生成自己的版本历史。
 
@@ -144,9 +144,13 @@ comm -13 baseline.sorted current.sorted \
 
 Worker 随后调用普通 `AmazonS3Client` 将对象 `putObject` 到目标桶（不做客户端加密）。
 
-**大文件跳过**：GET 前先 HEAD 获取 `Content-Length`。若 `>= 5 GB`，跳过该对象，将 `key\tsize\ttimestamp` 追加到 `oversized.log`，计入 `keys.skipped` 指标，不视为失败。
+**大文件跳过**：GET 前先 HEAD 获取 `Content-Length`。若 `>= 5 GB`，跳过该对象，将 `percent-encoded-key\tsize\ttimestamp` 追加到 `oversized.log`，计入 `keys.skipped` 指标，不视为失败。大文件是**正式例外**：最终 ListObjectsV2 对账时须通过 `--oversized-keys` 传入 `oversized.keys`（从 `oversized.log` 提取的纯 key 列表），从期望集合中扣除，否则它们会出现在 `missing-in-destination.txt`。
 
-**失败日志**：任何 key 解密或 PUT 失败时，将 `key\treason\ttimestamp` 追加到 `failed.log`。进程结束时将失败 key 数量输出到 stderr；`failed.log` 可直接作为下次 `migrate.jar` 的输入用于重试。
+**失败日志**：拆为两个文件：
+- `failed.keys`：每行一个 percent-encoded key，可直接作为下次 `migrate.jar` 的输入用于重试。
+- `failed.log`：`percent-encoded-key\treason\ttimestamp`，供排查用，不直接作为输入。
+
+进程结束时将失败 key 数量输出到 stderr。
 
 ## Maven 依赖
 
@@ -231,8 +235,11 @@ java -jar migrate.jar [参数] [key-list-file]
 --metrics           上报 CloudWatch 指标（命名空间: S3Migration）
 --verify-sample     已迁移 key 的 HEAD 验证比例（默认: 0.01）
 --log-every         进度日志间隔（单位: key 数，默认: 1000）
---oversized-log     大文件（≥ 5 GB）本地记录路径（默认: ./oversized.log）
---failed-log        失败 key 本地记录路径（默认: ./failed.log）
+--oversized-log     大文件（≥ 5 GB）本地 TSV 路径（默认: ./oversized.log）
+--oversized-log-s3  大文件日志 S3 备份 URI
+--failed-keys       失败 key 本地路径，纯 key 列表，可直接重试（默认: ./failed.keys）
+--failed-log        失败详情本地 TSV 路径（默认: ./failed.log）
+--failed-log-s3     失败日志 S3 备份 URI
 --region
 --profile
 ```
@@ -301,39 +308,43 @@ make release
 
 ### T+2 最终核验
 
-```bash
-java -jar inventory-diff.jar \
-  --baseline-manifest s3://INV_BUCKET/.../t-7/manifest.json \
-  --current-manifest  s3://INV_BUCKET/.../t+2/manifest.json \
-  --inventory-bucket INV_BUCKET | wc -l
+**唯一验收标准：`ListObjectsV2` 对账 `missing-in-destination=0`。**
 
-sort t7-checkpoint.log delta-*.log | uniq | wc -l
-
-java -jar migrate.jar --dry-run --src-bucket SRC --dst-bucket DST missing-keys.txt
-
-aws s3 cp s3://DST_BUCKET/some-key /tmp/check && file /tmp/check
-```
-
-### ListObjectsV2 全量 key 对账
-
-在 T 天确认无新写入后，使用 `ListObjectsV2` 扫描源桶和目标桶当前 key 集合，外部排序后做集合差分：
+checkpoint 计数和 inventory diff 行数仅供参考（含重试、overwrite 等因素，与"当前 key 集合"不等价），不作为验收依据。
 
 ```bash
+# 1. 从 oversized.log 提取纯 key 列表（正式例外，对账时扣除）
+cut -f1 s3://DST_BUCKET/migration-logs/t7-oversized.log > /tmp/oversized.keys
+# 合并所有增量 oversized.log（如有）
+for f in s3://DST_BUCKET/migration-logs/delta-*-oversized.log; do
+  aws s3 cp "$f" - | cut -f1 >> /tmp/oversized.keys
+done
+
+# 2. ListObjectsV2 全量对账，排除 migration-logs/ 并扣除大文件例外
 python3 scripts/verify-listobjects-v2.py \
   --src-bucket SRC_BUCKET \
   --dst-bucket DST_BUCKET \
+  --exclude-dst-prefix migration-logs/ \
+  --oversized-keys /tmp/oversized.keys \
   --workdir /mnt/scratch/verify \
   --sort-mem 20G \
   --sort-parallel "$(nproc)" \
   --region REGION
+
+# 3. 对 missing-in-destination.txt 中的 key 补跑迁移
+java -jar migrate.jar --src-bucket SRC --dst-bucket DST \
+  /mnt/scratch/verify/missing-in-destination.txt
+
+# 4. 抽查目标桶明文
+aws s3 cp s3://DST_BUCKET/some-key /tmp/check && file /tmp/check
 ```
 
 输出：
 
-- `missing-in-destination.txt`：源桶当前存在但目标桶缺失的 key（必须为 0）
-- `extra-in-destination.txt`：目标桶存在但源桶当前不存在的 key（通常用于人工确认）
+- `missing-in-destination.txt`：**必须为 0**，否则补跑步骤 3
+- `extra-in-destination.txt`：目标桶多出的 key，通常用于人工确认
 
-本迁移只处理当前版本，因此 `ListObjectsV2` 对账与迁移范围一致。它验证当前 key 是否齐全；如需进一步验证内容一致性，可对缺失以外的样本下载后比较 size/hash。
+本迁移只处理当前版本，因此 `ListObjectsV2` 对账与迁移范围完全一致。
 
 ## 附加功能
 
@@ -345,8 +356,8 @@ python3 scripts/verify-listobjects-v2.py \
 | 4 | 验证采样 | 线程池排空后对目标桶中随机样本执行 HEAD 检查 |
 | 5 | CloudWatch 指标 | `keys.attempted/succeeded/failed/skipped`、`bytes.decrypted`、`kms.calls`、`decrypt.duration_ms` |
 | 6 | CSV MD5 校验 | 处理前检测损坏的 inventory part |
-| 7 | 大文件跳过日志 | GET 前 HEAD 检查；≥ 5 GB 的对象写入 `oversized.log`（key、size、timestamp），计入 `keys.skipped`，不中断主流程 |
-| 8 | 结构化失败日志 | 每个失败 key 写入 `failed.log`（key、reason、timestamp）；文件可直接作为下次运行的输入用于重试 |
+| 7 | 大文件跳过日志 | GET 前 HEAD 检查；≥ 5 GB 的对象写入 `oversized.log`（percent-encoded-key、size、timestamp），计入 `keys.skipped`，不中断主流程；最终对账须用 `--oversized-keys` 扣除 |
+| 8 | 结构化失败日志 | `failed.keys`（纯 key 列表，可直接重试）+ `failed.log`（percent-encoded-key、reason、timestamp，供排查） |
 
 ## 待补充约束
 

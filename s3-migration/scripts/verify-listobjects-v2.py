@@ -7,8 +7,15 @@ externally sorts them, and produces:
   - missing-in-destination.txt: source current keys absent from destination
   - extra-in-destination.txt: destination keys absent from source
 
+Use --exclude-dst-prefix to skip operational prefixes (e.g. migration-logs/)
+that live in the destination bucket alongside migrated objects.
+
+Use --oversized-keys to supply a file of known-skipped large keys (one
+percent-encoded key per line). Those keys are subtracted from the expected
+source set so they do not appear as missing.
+
 It verifies current object keys only. It does not verify source version history;
-use ListObjectVersions for that if preserving every historical version matters.
+use ListVersions for that if preserving every historical version matters.
 """
 
 from __future__ import annotations
@@ -37,6 +44,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dst-bucket", required=True)
     parser.add_argument("--src-prefix", default="")
     parser.add_argument("--dst-prefix", default="")
+    parser.add_argument(
+        "--exclude-dst-prefix",
+        default="migration-logs/",
+        help="Skip destination keys that start with this prefix (default: migration-logs/).",
+    )
+    parser.add_argument(
+        "--oversized-keys",
+        help="File of percent-encoded keys (one per line) that were intentionally skipped "
+             "as oversized. These are excluded from the expected source set.",
+    )
     parser.add_argument("--workdir", default="./verify-work")
     parser.add_argument("--profile")
     parser.add_argument("--region")
@@ -59,6 +76,7 @@ def list_keys(
     session: boto3.session.Session,
     bucket: str,
     prefix: str,
+    exclude_prefix: str,
     page_size: int,
     out_path: Path,
 ) -> int:
@@ -73,6 +91,8 @@ def list_keys(
             PaginationConfig={"PageSize": page_size},
         ):
             for obj in page.get("Contents", []):
+                if exclude_prefix and obj["Key"].startswith(exclude_prefix):
+                    continue
                 # Percent-encode so unusual keys with newlines remain one record per line.
                 out.write(quote(obj["Key"], safe="/") + "\n")
                 count += 1
@@ -85,41 +105,39 @@ def list_keys(
 
 def run(command: Iterable[str], env: dict[str, str] | None = None) -> None:
     print("+ " + " ".join(command), file=sys.stderr)
-    subprocess.run(list(command), check=True, env=env)
+    result = subprocess.run(list(command), env=env)
+    if result.returncode != 0:
+        raise subprocess.CalledProcessError(result.returncode, command)
 
 
 def sort_unique(raw_path: Path, sorted_path: Path, tmp_dir: Path, args: argparse.Namespace) -> None:
     env = os.environ.copy()
     env["LC_ALL"] = "C"
-    command = [
-        "sort",
-        "-u",
-        "-S",
-        args.sort_mem,
-        "--parallel",
-        str(args.sort_parallel),
-        "-T",
-        str(tmp_dir),
-        "-o",
-        str(sorted_path),
+    base_cmd = [
+        "sort", "-u",
+        "-S", args.sort_mem,
+        "-T", str(tmp_dir),
+        "-o", str(sorted_path),
         str(raw_path),
     ]
     try:
-        run(command, env=env)
+        run(["sort", "-u", "-S", args.sort_mem,
+             "--parallel", str(args.sort_parallel),
+             "-T", str(tmp_dir), "-o", str(sorted_path), str(raw_path)], env=env)
     except subprocess.CalledProcessError:
-        # BSD sort does not support --parallel. Keep a fallback for local dry runs.
-        fallback = [
-            "sort",
-            "-u",
-            "-S",
-            args.sort_mem,
-            "-T",
-            str(tmp_dir),
-            "-o",
-            str(sorted_path),
-            str(raw_path),
-        ]
-        run(fallback, env=env)
+        # BSD sort does not support --parallel; fall back for local dry runs.
+        run(base_cmd, env=env)
+
+
+def subtract_file(minuend: Path, subtrahend: Path, result: Path, tmp_dir: Path, args: argparse.Namespace) -> None:
+    """Write lines in minuend that are not in subtrahend into result."""
+    env = os.environ.copy()
+    env["LC_ALL"] = "C"
+    subtrahend_sorted = tmp_dir / "subtrahend.sorted"
+    sort_unique(subtrahend, subtrahend_sorted, tmp_dir, args)
+    with result.open("w", encoding="utf-8", newline="\n") as out:
+        subprocess.run(["comm", "-23", str(minuend), str(subtrahend_sorted)],
+                       check=True, stdout=out, env=env)
 
 
 def comm(left: Path, right: Path, out_path: Path, flags: str) -> int:
@@ -153,14 +171,26 @@ def main() -> int:
     extra = workdir / "extra-in-destination.txt"
 
     session = session_for(args)
-    src_count = list_keys(session, args.src_bucket, args.src_prefix, args.page_size, src_raw)
-    dst_count = list_keys(session, args.dst_bucket, args.dst_prefix, args.page_size, dst_raw)
+    src_count = list_keys(session, args.src_bucket, args.src_prefix,
+                          "", args.page_size, src_raw)
+    dst_count = list_keys(session, args.dst_bucket, args.dst_prefix,
+                          args.exclude_dst_prefix, args.page_size, dst_raw)
 
     sort_unique(src_raw, src_sorted, tmp_dir, args)
     sort_unique(dst_raw, dst_sorted, tmp_dir, args)
 
-    missing_count = comm(src_sorted, dst_sorted, missing, "-23")
-    extra_count = comm(src_sorted, dst_sorted, extra, "-13")
+    # If oversized keys were intentionally skipped, subtract them from the
+    # expected source set so they don't appear as missing.
+    effective_src = src_sorted
+    if args.oversized_keys:
+        oversized_path = Path(args.oversized_keys)
+        effective_src = workdir / "source.expected.sorted"
+        subtract_file(src_sorted, oversized_path, effective_src, tmp_dir, args)
+        oversized_count = src_count - sum(1 for _ in effective_src.open())
+        print(f"oversized_keys_excluded={oversized_count}", file=sys.stderr)
+
+    missing_count = comm(effective_src, dst_sorted, missing, "-23")
+    extra_count = comm(effective_src, dst_sorted, extra, "-13")
 
     print(f"source_current_keys={src_count}")
     print(f"destination_current_keys={dst_count}")
