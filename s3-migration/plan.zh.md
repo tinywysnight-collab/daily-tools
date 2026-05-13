@@ -1,0 +1,349 @@
+# S3 CSE-KMS 迁移方案
+
+## 目录
+
+1. [背景](#背景)
+2. [时间线](#时间线)
+3. [技术选型](#技术选型)
+4. [目录结构](#目录结构)
+5. [核心算法](#核心算法)
+6. [Maven 依赖](#maven-依赖)
+7. [命令行接口](#命令行接口)
+8. [检查点与容错](#检查点与容错)
+9. [Makefile 目标](#makefile-目标)
+10. [运维手册](#运维手册)
+11. [附加功能](#附加功能)
+12. [待补充约束](#待补充约束)
+
+## 背景
+
+源 S3 桶中约 **1000 万个文件**，使用 **AWS S3 V1 Java SDK 客户端加密（CSE-KMS）** 加密。目标：解密每个文件，将明文写入新的目标桶。每天仍有新文件写入，写入将在时间点 T（约 7 天后）停止；所有文件必须在 T+2 前完成迁移。
+
+迁移使用每日 S3 Inventory 清单（CSV 格式，不使用 Athena）作为文件列表的主要来源。由于 S3 Inventory **不保证排序**，每日增量通过“规范化 Inventory → 磁盘外部排序 → 有序集合差分”计算，不依赖 Athena 或独立部署数据库。解密直接使用 **AWS V1 Java SDK**（`AmazonS3EncryptionClient`），彻底消除协议重新实现的风险。
+
+本方案只迁移源桶的 **current version**。历史版本和 delete marker 不进入迁移范围；目标桶对象按新文件 PUT。
+
+## 时间线
+
+| 天 | 操作 |
+|----|------|
+| 现在 | 创建 S3 Inventory 配置（首次交付最多需 48 小时） |
+| T-14 或 T-7 | **全量迁移**：以该日清单为基线，迁移全部约 1000 万个 key；若吞吐压测显示 T-7 风险过高则提前到 T-14 |
+| 全量完成后 | **增量**：最新清单减去全量基线 |
+| T-3 至 T+0 | 每日增量：当天清单减去前一天清单 |
+| T+1, T+2 | 文件写入停止后的最终补充增量 |
+| T+2 | **截止日期**：所有文件完成迁移 |
+
+## 技术选型
+
+**Java 17 (LTS) + Maven**。使用 `maven-shade-plugin` 从一个多模块 Maven 项目构建两个 fat JAR：
+
+- `inventory-diff.jar`：计算每日增量 key 列表
+- `migrate.jar`：解密并复制文件
+
+使用 Java 的原因：直接调用 `AmazonS3EncryptionClient`（V1 SDK），完全消除协议重新实现的风险；SDK 内部处理所有信封解封、KMS 解密和 AES 逻辑，与文件原始加密方式完全一致。
+
+## 目录结构
+
+```text
+s3-migration/
+  plan.zh.md
+  plan.en.md
+  pom.xml
+  Makefile
+  inventory-diff/
+    pom.xml
+    src/main/java/com/migration/s3/inventorydiff/
+      InventoryDiffMain.java
+    src/test/java/com/migration/s3/inventorydiff/
+      InventoryDiffMainTest.java
+  migrate/
+    pom.xml
+    src/main/java/com/migration/s3/migrate/
+      MigrateMain.java
+    src/test/java/com/migration/s3/migrate/
+      MigrateMainTest.java
+  common/
+    pom.xml
+    src/main/java/com/migration/s3/
+      inventory/
+        Manifest.java
+        ManifestLoader.java
+        InventoryReader.java
+        InventoryStream.java
+      delta/
+        ExternalSortDiff.java
+      worker/
+        MigrationWorker.java
+        WorkerPool.java
+      checkpoint/
+        CheckpointLog.java
+      metrics/
+        MetricsEmitter.java
+        CloudWatchEmitter.java
+        NoopEmitter.java
+    src/test/java/com/migration/s3/
+      delta/ExternalSortDiffTest.java
+      inventory/InventoryReaderTest.java
+      checkpoint/CheckpointLogTest.java
+      worker/MigrationWorkerTest.java
+  scripts/
+    setup-inventory.sh
+    run-t7.sh
+    run-daily.sh
+    verify-listobjects-v2.py
+```
+
+## 核心算法
+
+### Inventory 结构与增量差分
+
+S3 Inventory 不保证对象 key 的输出顺序。因此不能直接对两个 manifest 做双指针归并。正确流程是：
+
+1. `InventoryStream` 按 `manifest.json` 遍历所有 gzipped CSV part，逐行流式读取。
+2. 解析 CSV 字段，URL decode key。
+3. Inventory 配置为 `Current version only`，不迁移历史版本和 delete marker。
+4. 输出比较记录：`key<TAB>etag<TAB>size<TAB>lastModified`。这样新增 key 和同名 overwrite 都会进入增量。
+5. 使用 EC2 本地 NVMe/EBS scratch 目录运行外部排序，例如 `LC_ALL=C sort -S 24G --parallel=$(nproc) -T /mnt/scratch -u`。
+6. 对两个已排序文件做集合差分，输出 `current - baseline`。
+7. 将差分结果投影回 key，并对 key 去重；同一个 key 多次变化时只需要迁移最终 current version。
+
+这仍然是“无 Athena、无独立 DB”的方案；内存由 `sort -S` 控制，数据落盘。32GB EC2 可用 `-S 20G`，64GB EC2 可用 `-S 45G`，同时预留 JVM、page cache 和系统内存。
+
+### 增量算法（磁盘外排）
+
+```bash
+normalize_inventory(baseline_manifest) > baseline.records
+normalize_inventory(current_manifest)  > current.records
+
+LC_ALL=C sort -S SORT_MEM -T SCRATCH -u baseline.records > baseline.sorted
+LC_ALL=C sort -S SORT_MEM -T SCRATCH -u current.records  > current.sorted
+
+comm -13 baseline.sorted current.sorted \
+  | cut -f1 \
+  | LC_ALL=C sort -S SORT_MEM -T SCRATCH -u \
+  > delta.keys
+```
+
+输出：`current` 中存在但 `baseline` 中不存在的 key，每行一个。
+
+全量运行时：调用 `inventory-diff` 时不传 `--baseline` 参数，输出当前清单规范化并排序后的全部 key。
+
+**URL 编码 key**：S3 Inventory 会对含特殊字符的 key 进行 URL 编码。比较和输出前需用 `URLDecoder.decode(key, StandardCharsets.UTF_8)` 解码。
+
+**当前版本限定**：本迁移只复制源桶当前版本。若源桶开启 versioning，历史版本和 delete marker 不进入迁移范围；目标桶按新 PUT 生成自己的版本历史。
+
+### V1 CSE-KMS 解密
+
+`MigrationWorker` 使用 `AmazonS3EncryptionClient`（V1 SDK）执行 GET 操作，SDK 透明处理完整的信封流程：
+
+1. 从对象用户元数据中读取 `x-amz-key-v2`（base64 编码的 KMS 加密 DEK）和 `x-amz-matdesc`（KMS 上下文）
+2. 使用加密的 DEK 和加密上下文调用 `KMS.Decrypt`
+3. 根据 `x-amz-cek-alg` 使用 AES-CBC 或 AES-GCM 解密对象体
+4. 返回明文的 `InputStream`
+
+Worker 随后调用普通 `AmazonS3Client` 将对象 `putObject` 到目标桶（不做客户端加密）。
+
+## Maven 依赖
+
+`common/pom.xml` 中定义：
+
+```xml
+<dependency>
+  <groupId>com.amazonaws</groupId>
+  <artifactId>aws-java-sdk-s3</artifactId>
+  <version>1.12.750</version>
+</dependency>
+<dependency>
+  <groupId>com.amazonaws</groupId>
+  <artifactId>aws-java-sdk-kms</artifactId>
+  <version>1.12.750</version>
+</dependency>
+<dependency>
+  <groupId>software.amazon.awssdk</groupId>
+  <artifactId>cloudwatch</artifactId>
+  <version>2.26.0</version>
+</dependency>
+<dependency>
+  <groupId>org.apache.commons</groupId>
+  <artifactId>commons-csv</artifactId>
+  <version>1.11.0</version>
+</dependency>
+<dependency>
+  <groupId>com.fasterxml.jackson.core</groupId>
+  <artifactId>jackson-databind</artifactId>
+  <version>2.17.1</version>
+</dependency>
+<dependency>
+  <groupId>org.junit.jupiter</groupId>
+  <artifactId>junit-jupiter</artifactId>
+  <version>5.11.0</version>
+  <scope>test</scope>
+</dependency>
+<dependency>
+  <groupId>org.mockito</groupId>
+  <artifactId>mockito-core</artifactId>
+  <version>5.12.0</version>
+  <scope>test</scope>
+</dependency>
+```
+
+## 命令行接口
+
+### `inventory-diff.jar`
+
+```text
+java -jar inventory-diff.jar [参数]
+
+--baseline-manifest  基线 manifest.json 的 S3 URI（省略 = 全量模式）
+--current-manifest   当前 manifest.json 的 S3 URI（必填）
+--inventory-bucket   存放 CSV parts 的桶（必填）
+--out                输出文件路径（默认: stdout）
+--scratch-dir        外部排序临时目录（建议本地 NVMe/EBS）
+--sort-mem           sort 内存预算（32GB EC2: 20G；64GB EC2: 45G）
+--sort-parallel      sort 并行度（默认: vCPU 数）
+--validate-checksums 读取前校验每个 CSV part 的 MD5（默认: true）
+--region             AWS 区域
+--profile            AWS 凭证 profile
+--verbose
+```
+
+退出码：`0`=成功，`1`=配置错误，`2`=S3 错误，`3`=清单/校验错误，`4`=I/O 错误。
+
+### `migrate.jar`
+
+```text
+java -jar migrate.jar [参数] [key-list-file]
+
+--src-bucket        加密源桶（必填）
+--dst-bucket        明文目标桶（必填）
+--concurrency       并行 worker 线程数（默认: 20；T-7 使用 50）
+--checkpoint        本地检查点文件（默认: ./checkpoint.log）
+--checkpoint-s3     检查点 S3 备份 URI
+--stop-flag-bucket  紧急停止标志所在桶
+--stop-flag-key     停止标志 S3 key（默认: migration/STOP）
+--dry-run           解密但不 PUT 到目标桶
+--metrics           上报 CloudWatch 指标（命名空间: S3Migration）
+--verify-sample     已迁移 key 的 HEAD 验证比例（默认: 0.01）
+--log-every         进度日志间隔（单位: key 数，默认: 1000）
+--region
+--profile
+```
+
+退出码：`0`=全部迁移完成，`1`=配置错误，`2`=部分失败，`3`=停止标志触发，`4`=检查点错误。
+
+key 列表从位置参数文件或 stdin 读取。
+
+## 检查点与容错
+
+- 本地追加写入文件：每行一个已完成的 S3 key
+- 启动时加载到内存 `HashSet<String>`，实现 O(1) 的 `contains()` 查询
+- 内存估算：1000 万 key × 平均约 80 字节 ≈ ~800 MB JVM 堆；使用 `-Xmx2g`
+- 每 100 次完成或每 5 秒（后台线程）刷新到本地文件
+- 每 10,000 次完成或每 10 分钟同步到 S3
+- 启动时：若本地文件不存在，从 S3 下载
+- 紧急停止：`aws s3 cp /dev/null s3://STOP_BUCKET/migration/STOP`，worker 每处理 1,000 个任务检查一次
+
+## Makefile 目标
+
+| 目标 | 命令 | 说明 |
+|------|------|------|
+| `build` | `mvn package -DskipTests` | 构建（跳过测试） |
+| `test` | `mvn verify` | 构建并运行所有测试 |
+| `clean` | `mvn clean` | 清理构建产物 |
+| `release` | `mvn package -DskipTests -Prelease` | 生成可在 Linux 运行的 fat JAR |
+
+## 运维手册
+
+### 第 0 天（现在）
+
+```bash
+./scripts/setup-inventory.sh SRC_BUCKET INV_BUCKET migration/inventory REGION
+# Inventory 必须配置为 Current version only，并包含 Key, ETag, Size, LastModified
+
+aws s3 ls s3://INV_BUCKET/migration/inventory/
+make release
+```
+
+### T-7 或 T-14（全量迁移）
+
+```bash
+./scripts/run-t7.sh
+# 使用 --concurrency 50
+# checkpoint-s3 = s3://OPS_BUCKET/migration/t7-checkpoint.log
+```
+
+崩溃后重跑同一命令，checkpoint 会跳过已完成 key。
+
+### 每日增量
+
+```bash
+./scripts/run-daily.sh YYYY-MM-DD-prev YYYY-MM-DD-today
+```
+
+### T+2 最终核验
+
+```bash
+java -jar inventory-diff.jar \
+  --baseline-manifest s3://INV_BUCKET/.../t-7/manifest.json \
+  --current-manifest  s3://INV_BUCKET/.../t+2/manifest.json \
+  --inventory-bucket INV_BUCKET | wc -l
+
+sort t7-checkpoint.log delta-*.log | uniq | wc -l
+
+java -jar migrate.jar --dry-run --src-bucket SRC --dst-bucket DST missing-keys.txt
+
+aws s3 cp s3://DST_BUCKET/some-key /tmp/check && file /tmp/check
+```
+
+### ListObjectsV2 全量 key 对账
+
+在 T 天确认无新写入后，使用 `ListObjectsV2` 扫描源桶和目标桶当前 key 集合，外部排序后做集合差分：
+
+```bash
+python3 scripts/verify-listobjects-v2.py \
+  --src-bucket SRC_BUCKET \
+  --dst-bucket DST_BUCKET \
+  --workdir /mnt/scratch/verify \
+  --sort-mem 20G \
+  --sort-parallel "$(nproc)" \
+  --region REGION
+```
+
+输出：
+
+- `missing-in-destination.txt`：源桶当前存在但目标桶缺失的 key（必须为 0）
+- `extra-in-destination.txt`：目标桶存在但源桶当前不存在的 key（通常用于人工确认）
+
+本迁移只处理当前版本，因此 `ListObjectsV2` 对账与迁移范围一致。它验证当前 key 是否齐全；如需进一步验证内容一致性，可对缺失以外的样本下载后比较 size/hash。
+
+## 附加功能
+
+| # | 功能 | 说明 |
+|---|------|------|
+| 1 | 预检 dry-run | T-7 前对 1,000 个随机 key 运行 dry-run，确认解密端到端可用 |
+| 2 | 紧急停止标志 | 每处理 1,000 个任务检查一次，无需 kill 信号即可优雅排空 |
+| 3 | 清单可用性轮询 | `ManifestLoader` 以指数退避（5→10→20→…→60 分钟）重试 |
+| 4 | 验证采样 | 线程池排空后对目标桶中随机样本执行 HEAD 检查 |
+| 5 | CloudWatch 指标 | `keys.attempted/succeeded/failed/skipped`、`bytes.decrypted`、`kms.calls`、`decrypt.duration_ms` |
+| 6 | CSV MD5 校验 | 处理前检测损坏的 inventory part |
+
+## 待补充约束
+
+- [ ] 源桶名：`___________`
+- [ ] 目标桶名：`___________`
+- [ ] Inventory 桶名：`___________`
+- [ ] AWS 区域：`___________`
+- [ ] KMS key ARN（用于权限验证）：`___________`
+- [ ] 运行 migrate.jar 的 EC2/ECS 规格：`___________`
+- [ ] 并发度上限（KMS TPS 配额）：`___________`
+- [ ] 是否需要 VPC Endpoint：`___________`
+- [ ] 日志保留策略：`___________`
+- [x] 不使用 Athena
+- [x] 暂不依赖独立部署 DB；RocksDB/SQLite 是否可安装待确认
+- [x] 可使用 32GB 或 64GB EC2 跑 inventory diff 与 verify job
+- [x] 一次性迁移，源对象为 V1 CSE-KMS，继续使用 AWS Java SDK V1 解密
+- [x] 若 T-7 风险过高，可提前 T-14 开始全量迁移
+- [x] 只迁移当前版本；目标桶对象按新文件处理
+- [x] T 天不会再有文件写入
+- [ ] 其他约束：`___________`
